@@ -1,0 +1,4 @@
+#!/bin/sh
+# netmap — run the python file sitting next to this launcher
+DIR=$(cd "$(dirname "$0")" && pwd)
+exec python3 "$DIR/netmap.py" "$@"

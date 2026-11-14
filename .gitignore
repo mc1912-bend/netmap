@@ -1,0 +1,14 @@
+# --- python noise ----------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+
+# --- local scans never live in the repo ------------------------------------
+*.json
+exports/
+state.json
+
+# --- editor / OS noise -----------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
