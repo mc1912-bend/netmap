@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# =============================================================================
+# netmapupdate — pull the repo and reinstall, in one command
+# =============================================================================
+#     sudo netmapupdate
+#
+# Does what you would otherwise type:
+#
+#     cd ~/netmap && git pull
+#     sudo bash ./install.sh
+#
+# Unlike twinops and dcraid there is nothing to restart: netmap runs from the
+# file on disk and keeps its state in ~/.netmap, so a pull is enough for the
+# next scan. The dashboard has to be closed and reopened only because curses
+# reads the code at launch.
+#
+# Flags
+#   --no-pull   skip git, just reinstall the command
+#   -h          this text
+# =============================================================================
+
+set -u
+
+ORIG=("$@")
+DO_PULL=1
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-pull) DO_PULL=0; shift ;;
+    -h|--help) awk 'NR>1 && /^set -u$/ {exit} NR>1' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown flag: $1"; echo "try: netmapupdate -h"; exit 1 ;;
+  esac
+done
+
+ok()   { printf '  ok    %s\n' "$*"; }
+warn() { printf '  warn  %s\n' "$*"; }
+bad()  { printf '  BAD   %s\n' "$*"; }
+
+if [ "$(id -u)" != "0" ]; then
+  echo "netmapupdate needs root - asking for it..."
+  exec sudo -p "  [sudo] " "$0" "${ORIG[@]}"
+fi
+
+# -----------------------------------------------------------------------------
+# Find the checkout
+# -----------------------------------------------------------------------------
+# `sudo netmapupdate` gives HOME=/root, so look in the real user's home too.
+REAL_HOME=/root
+if [ -n "${SUDO_USER:-}" ]; then
+  REAL_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+  [ -n "$REAL_HOME" ] || REAL_HOME=/root
+fi
+
+has_repo() { [ -n "${1:-}" ] && [ -d "$1/.git" ] && [ -f "$1/netmap.py" ]; }
+
+find_repo() {
+  local c
+  for c in "$@"; do
+    has_repo "$c" && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+
+if [ "$DO_PULL" = "1" ]; then
+  if ! REPO="$(find_repo "${NETMAP_REPO:-}" "$PWD" "$REAL_HOME/netmap" \
+                        "$REAL_HOME/secrhacshit/netmap" "$REAL_HOME/netmap/netmap" \
+                        "/opt/netmap" "/usr/local/src/netmap")"; then
+    bad "can't find the netmap checkout"
+    echo
+    echo "  tried: \$NETMAP_REPO, $PWD, $REAL_HOME/netmap, $REAL_HOME/secrhacshit/netmap"
+    echo
+    echo "  clone it, or point at wherever it lives:"
+    echo "      git clone https://github.com/mc1912-bend/netmap.git ~/netmap"
+    echo "      NETMAP_REPO=/path/to/netmap netmapupdate"
+    exit 1
+  fi
+
+  echo "  repo: $REPO"
+
+  run_git() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$(stat -c %U "$REPO/.git" 2>/dev/null)" = "$SUDO_USER" ]; then
+      sudo -u "$SUDO_USER" git -C "$REPO" "$@"
+    else
+      git -C "$REPO" "$@"
+    fi
+  }
+
+  BEFORE="$(run_git rev-parse HEAD 2>/dev/null || echo none)"
+  if ! run_git pull --ff-only; then
+    bad "git pull failed - nothing on disk was changed"
+    echo "    run: git -C $REPO status"
+    exit 1
+  fi
+  AFTER="$(run_git rev-parse HEAD 2>/dev/null || echo none)"
+  if [ "$BEFORE" = "$AFTER" ]; then
+    ok "already up to date"
+  else
+    ok "updated: $(run_git log --oneline -1)"
+  fi
+else
+  REPO="$(dirname "$(readlink -f "$0")")"
+  [ -f "$REPO/netmap.py" ] || REPO=""
+fi
+
+# -----------------------------------------------------------------------------
+# Reinstall
+# -----------------------------------------------------------------------------
+if [ -n "${REPO:-}" ] && [ -f "$REPO/install.sh" ]; then
+  echo
+  ( cd "$REPO" && bash ./install.sh ) || { bad "install.sh failed"; exit 1; }
+else
+  bad "no install.sh found${REPO:+ in $REPO}"
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Say what it can actually do on this box
+# -----------------------------------------------------------------------------
+echo
+for t in python3 nmap arp-scan; do
+  if command -v "$t" >/dev/null 2>&1; then
+    ok "$t present"
+  else
+    warn "$t missing - netmap still works, just slower or less accurate"
+  fi
+done
+
+mkdir -p "$REAL_HOME/.netmap" 2>/dev/null
+chmod 700 "$REAL_HOME/.netmap" 2>/dev/null
+
+cat <<EOF
+
+  commands:  netmap        scan, save, dashboard
+             netmap scan   scan only
+             netmap show   text dump
+
+  state:     $REAL_HOME/.netmap/state.json
+
+  reopening the dashboard is enough to pick up new code; your scans are in the
+  state file and are not touched by an update.
+EOF

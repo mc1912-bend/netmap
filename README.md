@@ -95,6 +95,7 @@ sudo netmap dash         # dashboard only, generates no traffic
 netmap show              # plain text dump of everything
 netmap show SD43-S       # just one network
 netmap export            # report for every network you have mapped
+sudo netmapupdate        # pull the repo and reinstall, one command
 ```
 
 ## Install
@@ -102,6 +103,16 @@ netmap export            # report for every network you have mapped
 ```sh
 sudo bash ./install.sh
 ```
+
+That installs three things: `netmap`, `netmapupdate`, and the python file in
+`/usr/local/lib/netmap/`. Updating later is:
+
+```sh
+sudo netmapupdate
+```
+
+It finds the checkout, pulls, reinstalls, and tells you which tools are
+present. `--no-pull` reinstalls without touching git.
 
 Needs `python3` and standard curses. `nmap` and `arp-scan` make it faster and
 more accurate; without them it falls back to a slow Python socket scan.
