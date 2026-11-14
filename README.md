@@ -50,28 +50,40 @@ exact command to run it.
 | `e` | export every known network to a text report |
 | `q` | quit |
 
-## The rules
+## Reading the attacks list
 
-Each suggestion carries its evidence and a noise label, sorted by score.
+Three columns, and each of them means something specific:
 
-| finding | suggestion | noise |
-|---|---|---|
-| open network | `twinstart` — evil twin + portal | medium |
-| shares readable without credentials | `sharestart` | low |
-| domain controller reachable | user enumeration + AS-REP/Kerberoast | low |
-| DC + machines authenticating | `dcraidstart --profile stealth` | medium |
-| SMB signing not required | relay | medium |
-| WEP | aircrack | low |
-| WPA2-Enterprise | rogue RADIUS (eaphammer) | medium |
-| WPA2-PSK | handshake capture | low |
-| admin panels found | `panelstart` (default logins) | high |
-| SNMP 161 | snmpwalk | low |
-| printer ports | PJL file access | low |
-| RTSP 554 | camera stream | medium |
-| RDP 3389 | direct desktop with any account | high |
+- **fit%** - how well what the scan found matches what the attack needs. 95% is
+  "the evidence is exactly right". 45% is "possible, but this attack is a
+  stretch on this network".
+- **noise** - how noticeable it is: `quiet`, `moderate`, `loud`.
+- **loot** - what you actually walk away with.
 
-Score is a fit estimate: how well the observed facts match what the attack
-needs. The reason string is the evidence, so you can disagree with it.
+The dashboard shows `why`, `loot` and `run` for whichever attack is selected, so
+nothing is a mystery number. `netmap show` also prints a **not applicable**
+section, which explains the attacks that did not fire and what was missing.
+
+| finding | suggestion | noise | loot |
+|---|---|---|---|
+| open network | `twinstart` - evil twin + portal | moderate | portal logins, fingerprints |
+| shares readable anonymously | `sharestart` | quiet | documents, and passwords inside them |
+| domain controller reachable | user enum + AS-REP/Kerberoast | quiet | usernames, crackable hashes |
+| DC + machines authenticating | `dcraidstart --profile stealth` | moderate | local admin, then cached creds |
+| SMB signing not required | relay | moderate | admin on hosts that accept it |
+| WEP | aircrack | quiet | the Wi-Fi key, in minutes |
+| WPA2-Enterprise | rogue RADIUS (eaphammer) | moderate | a domain username + password |
+| WPA2-PSK | handshake capture | quiet | the Wi-Fi passphrase |
+| WPA3 only | transition-mode check | quiet | still a WPA2 handshake if mixed |
+| admin panels found | `panelstart` | loud | routers, cameras, NAS logins |
+| SNMP 161 | snmpwalk | quiet | device config, plain-text passwords |
+| printer ports | PJL file access | quiet | stored documents, address books |
+| RTSP 554 | camera stream | moderate | live video, camera admin login |
+| RDP 3389 | direct desktop | loud | a desktop with any valid account |
+
+The Wi-Fi rules only fire when the scan can actually tell what the network is.
+If the security type is unknown, nothing is claimed - a WPA2 network is never
+reported as open.
 
 ## Commands
 

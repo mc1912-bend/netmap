@@ -158,9 +158,17 @@ def ssid_of(iface):
 
 
 def wifi_security(iface):
-    for line in sh("nmcli -t -f GENERAL.CONNECTION dev show %s" % iface).splitlines():
-        if line.startswith("GENERAL.CONNECTION:"):
-            return line.split(":", 1)[1]
+    """Security of the network we are actually associated with.
+
+    This used to return the connection *profile name*, which then looked like
+    an unknown security type and fell through to "open" - which is how a WPA2
+    network got told to run an evil twin. Take the active scan row instead.
+    """
+    if have("nmcli"):
+        for line in sh("nmcli -t -f IN-USE,SSID,SECURITY dev wifi list", 60).splitlines():
+            if line.startswith("*:"):
+                sec = line.rsplit(":", 1)[-1].strip()
+                return sec or "OPEN"
     return ""
 
 
@@ -423,21 +431,68 @@ def do_scan(iface=None, deep=False):
 # -----------------------------------------------------------------------------
 # rules — what is worth attacking, and why
 # -----------------------------------------------------------------------------
+LOOT = {
+    "Evil twin + captive portal":
+        "what people type into the portal - logins, emails, sometimes credentials",
+    "WEP cracks in minutes":
+        "the Wi-Fi key, in about five minutes",
+    "Rogue RADIUS (802.1X twin)":
+        "a domain username and password, in plain text after cracking",
+    "Capture the WPA2 handshake":
+        "the Wi-Fi passphrase, which is usually reused elsewhere",
+    "WPA3 transition mode":
+        "still a WPA2 handshake - mixed WPA2/WPA3 clients can be downgraded",
+    "Enumerate users, then roast":
+        "usernames and crackable hashes, which become a real domain account",
+    "NTLM relay chain (rbcd)":
+        "local admin on a machine, then its cached credentials and files",
+    "Shares readable anonymously":
+        "documents, configs, and any passwords written inside them",
+    "SMB relay open":
+        "admin on every host that accepts a relayed authentication",
+    "Admin panels, try default logins":
+        "routers, cameras, NAS; often the Wi-Fi key and stored credentials",
+    "SNMP community strings":
+        "device config, user lists, sometimes plain-text passwords",
+    "Printer file access":
+        "stored documents, address books, and the scan-to-folder password",
+    "Camera stream":
+        "live video, and usually the camera's own admin login",
+    "RDP exposed":
+        "a full desktop with any valid account",
+    "Nothing answered":
+        "nothing - this is the absence of a target",
+}
+
+
+def loot_for(title):
+    best = ""
+    for key, val in LOOT.items():
+        if (title.startswith(key) or key in title) and len(key) > len(best):
+            best = key
+    return LOOT.get(best, "see the command")
+
+
 def rule(score, title, why, noise, command, tool):
     return {"score": round(score, 2), "title": title, "why": why,
-            "noise": noise, "command": command, "tool": tool}
+            "noise": noise, "command": command, "tool": tool,
+            "loot": loot_for(title)}
 
 
 def security_kind(sec):
-    s = (sec or "").upper()
-    if not s or s in ("--", "OPEN"):
+    s = (sec or "").upper().strip()
+    if s in ("--", "OPEN"):
         return "open"
+    if not s:
+        return "unknown"
     if "802.1X" in s or "EAP" in s or "ENTERPRISE" in s:
         return "enterprise"
-    if "WPA3" in s:
-        return "wpa3"
     if "WEP" in s:
         return "wep"
+    if "WPA3" in s and "WPA2" in s:
+        return "psk"          # transition mode: the WPA2 path still exists
+    if "WPA3" in s:
+        return "wpa3"
     if "WPA" in s:
         return "psk"
     return "other"
@@ -448,6 +503,12 @@ def analyse(net):
     hosts = net.get("hosts", [])
     aps = net.get("aps", [])
     own = security_kind(net.get("iface", {}).get("security"))
+    if own in ("unknown", "other"):
+        want = net.get("iface", {}).get("ssid") or net.get("ssid")
+        for ap in aps:
+            if want and ap.get("ssid") == want:
+                own = security_kind(ap.get("security"))
+                break
 
     kinds = {}
     for ap in aps:
@@ -471,6 +532,12 @@ def analyse(net):
             "WPA2-Enterprise is in use; clients often skip certificate checks, "
             "so a fake AP collects MSCHAPv2 that cracks offline",
             "medium", "eaphammer -i wlan0 --auth wpa-eap --creds", "eaphammer"))
+    if own == "wpa3" or kinds.get("wpa3"):
+        out.append(rule(
+            0.40, "WPA3 transition mode",
+            "WPA3 is in use; if the network also allows WPA2 the handshake can "
+            "still be captured, otherwise this needs SAE attacks",
+            "low", "capture and check for a WPA2 handshake first", "aircrack"))
     if own == "psk" or kinds.get("psk"):
         out.append(rule(
             0.70, "Capture the WPA2 handshake",
@@ -507,7 +574,7 @@ def analyse(net):
                 if s.get("access", "").lower().startswith("read")]
     if readable:
         out.append(rule(
-            0.92, "Shares readable without credentials (%d)" % len(readable),
+            0.92, "Shares readable anonymously (%d)" % len(readable),
             ", ".join("%s/%s" % x for x in readable[:4]),
             "low", "sudo sharestart", "sharestart"))
 
@@ -596,9 +663,19 @@ def store_scan(net):
 # -----------------------------------------------------------------------------
 # text output
 # -----------------------------------------------------------------------------
+NOISE_WORD = {"low": "quiet", "medium": "moderate", "high": "loud"}
+
+
+def noise_word(n):
+    return NOISE_WORD.get((n or "").lower(), n or "?")
+
+
 def bar(score, width=10):
     n = int(round(score * width))
-    return "█" * n + "·" * (width - n)
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+    if "utf" in enc:
+        return chr(0x2588) * n + chr(0x00B7) * (width - n)
+    return "#" * n + "-" * (width - n)
 
 
 def show(key=None):
@@ -627,13 +704,31 @@ def show(key=None):
             print("  %-15s %-17s %-24s %s" % (
                 h.get("ip"), h.get("mac", "-"),
                 (h.get("hostname") or h.get("role", ""))[:24], ports))
+        kinds_seen = {security_kind(a.get("security")) for a in n.get("aps", [])}
+        has_dc = any(h.get("role") == "domain controller" for h in n.get("hosts", []))
+        open_shares = any(s.get("access", "").lower().startswith("read")
+                          for h in n.get("hosts", [])
+                          for s in h.get("smb", {}).get("shares", []))
+        print("\nnot applicable here")
+        if not has_dc:
+            print("  domain attacks        no domain controller answered")
+        if not open_shares:
+            print("  share crawling        no share was readable without credentials")
+        if "enterprise" not in kinds_seen:
+            print("  rogue RADIUS          no 802.1X network seen")
+        if "open" not in kinds_seen:
+            print("  evil twin portal      no open network in range")
+
         print("\nattacks")
+        print("  fit% = how well the evidence matches   "
+              "noise = how noticeable   loot = what you leave with")
         for r in n.get("attacks", []):
-            print("  %s %3d%%  %-38s %s" % (bar(r["score"]),
-                                            int(r["score"] * 100),
-                                            r["title"][:38], r["noise"]))
-            print("         %s" % r["why"])
-            print("         -> %s" % r["command"])
+            print("  %s %3d%%  %-38s noise: %s" % (
+                bar(r["score"]), int(r["score"] * 100),
+                r["title"][:40], noise_word(r.get("noise"))))
+            print("         why   %s" % r["why"])
+            print("         loot  %s" % r.get("loot", ""))
+            print("         run   %s" % r["command"])
 
 
 def export():
@@ -711,6 +806,9 @@ class Dash:
                 net.get("key", ""), net.get("subnet", ""),
                 len(net.get("hosts", [])), net.get("scanned", "")[:16]))
         self.put(0, max(0, w - 28), "q quit  s scan  e export", curses.A_DIM)
+        self.put(1, 1, "fit% = how well the evidence matches the attack   "
+                       "noise = how noticeable   loot = what you leave with",
+                 curses.A_DIM)
 
         self.put(2, 1, "NETWORKS", curses.A_BOLD)
         for i, k in enumerate(self.keys[:max(3, (h - 6) // 3)]):
@@ -741,22 +839,23 @@ class Dash:
         self.put(ay, left, "ATTACKS - ranked by fit" +
                  ("  (selected)" if self.view == "attacks" else ""), curses.A_BOLD)
         attacks = net.get("attacks", [])
-        for i, r in enumerate(attacks[:max(2, h - ay - 4)]):
+        for i, r in enumerate(attacks[:max(2, h - ay - 5)]):
             attr = curses.A_REVERSE if (self.view == "attacks" and i == self.hi) else 0
-            self.put(ay + 1 + i, left, "%s %3d%%  %-34s %s" % (
-                bar(r["score"]), int(r["score"] * 100), r["title"][:34],
-                r["noise"]), attr)
+            self.put(ay + 1 + i, left, "%s %3d%%  %-32s %s" % (
+                bar(r["score"]), int(r["score"] * 100), r["title"][:32],
+                noise_word(r.get("noise"))), attr)
 
         if self.view == "attacks" and attacks:
             r = attacks[min(self.hi, len(attacks) - 1)]
-            self.put(h - 3, 1, r["why"], curses.A_DIM)
-            self.put(h - 2, 1, "  -> " + r["command"], curses.A_BOLD)
+            self.put(h - 4, 1, "why   " + r["why"], curses.A_DIM)
+            self.put(h - 3, 1, "loot  " + r.get("loot", ""), curses.A_DIM)
+            self.put(h - 2, 1, "run   " + r["command"], curses.A_BOLD)
         elif hosts:
             hst = hosts[min(self.hi, len(hosts) - 1)]
             smb = hst.get("smb", {})
             web = "  ".join("%s %s" % (x.get("port"), (x.get("title") or "")[:20])
                             for x in hst.get("web", [])[:2])
-            self.put(h - 3, 1, "domain %s   signing %s   %s" % (
+            self.put(h - 4, 1, "domain %s   signing %s   %s" % (
                 smb.get("domain", "-"), smb.get("signing", "-"), web), curses.A_DIM)
             self.put(h - 2, 1, "ports: " + ",".join(
                 str(p["port"]) for p in hst.get("ports", [])), curses.A_DIM)
